@@ -1,0 +1,23 @@
+# File e cartelle di Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+
+# File di output e temporanei di LaTeX
+*.aux
+*.log
+*.out
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+
+# Output della nostra pipeline (che non vogliamo su Git)
+*.pdf
+temp_*.tex
+temp_*.json
+documento_finale.tex
+
+# Immagini scaricate
+images/
