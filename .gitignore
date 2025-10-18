@@ -21,3 +21,6 @@ documento_finale.tex
 
 # Immagini scaricate
 images/
+
+# Chiavi in .env
+.env
