@@ -1,165 +1,253 @@
-import subprocess                   #per eseguire comandi esterni
-import os                           #per operazioni sul filesystem
+import subprocess                   # per eseguire comandi esterni
+import os                           # per operazioni sul filesystem
 import json                         # lavora con i dati json ottenuti dall'LLM
+import shutil                       # per copiare il file finale
+import uuid                         # per generare nomi univoci
 
 from dotenv import load_dotenv
 import google.generativeai as genai
 
-# Carichiamo le variabili d'ambiente (le nostre chiavi API)
+# Carico le variabili d'ambiente (le mie chiavi API)
 load_dotenv()
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 if not GEMINI_API_KEY:
-     # Se la chiave non eiste stampiamo errore e chiudiamo il programma
-     print(f"Non è stata trovata la chiave API per Gemini")
-     exit()
+    # Se non trovo la chiave, stampo un errore e chiudo il programma
+    print(f"Non è stata trovata la chiave API per Gemini")
+    exit()
 
 try:
-     genai.configure(api_key=GEMINI_API_KEY)
+    genai.configure(api_key=GEMINI_API_KEY)
 except Exception as e:
-     print(f"Configurazione chiave fallita, errore: {e}")
-     exit()
+    print(f"Configurazione chiave fallita, errore: {e}")
+    exit()
           
-# --- Agente 01 : Convertitore da .docx a .tex ---
-def agente_convertitore(file_input_docx, file_output_tex):
-    
+# --- Agente 01 : Convertitore da .docx a .tex --- 
+def agente_convertitore(file_input_docx):
     """
-        Usa Pandoc per convertire un file .docx in .tex
-        Restituisce true se la conversione ha successo, false altrimenti
+        Uso Pandoc per convertire un file .docx in .tex
+        Restituisco il contenuto del file .tex come stringa
     """
     print(f"Agente 01: Avvio conversione di '{file_input_docx}' ---")
 
-    #Verifichiamo che l'input esista
+    # Verifico che l'input esista
     if not os.path.exists(file_input_docx):
         print(f"Il file '{file_input_docx}' non è stato trovato nella directory")
-        return False
+        return None
+    
+    # Creo un nome file temporaneo unico
+    temp_tex = f"temp_{uuid.uuid4().hex}.tex"
     
     try:
         subprocess.run(
-            ['pandoc', file_input_docx, '-o', file_output_tex],
-            check = True,               #Se abbiamo eroore si ferma
-            capture_output = True,
-            text = True
+            ['pandoc', '-s', file_input_docx, '-o', temp_tex],
+            check=True,               # Se ho errore si ferma
+            capture_output=True,
+            text=True
         )
 
-        print(f"Creato file .tex grezzo di nome: '{file_output_tex}'")
-        return True
+        print(f"Conversione completata, leggo il contenuto...")
+        # Leggo il contenuto del file
+        with open(temp_tex, 'r', encoding='utf-8') as f:
+            contenuto = f.read()
+        
+        # Elimino il file temporaneo
+        os.remove(temp_tex)
+        return contenuto
 
     except FileNotFoundError:
-            print(f"Comando pandoc non trovato")
-            return False
-    
+        print(f"Comando pandoc non trovato")
+        # Pulisco in caso di errore
+        if os.path.exists(temp_tex):
+            os.remove(temp_tex)
+        return None
+
     except subprocess.CalledProcessError as e:
         print(f"{e.stderr}")
-        return False
-    
+        # Pulisco in caso di errore
+        if os.path.exists(temp_tex):
+            os.remove(temp_tex)
+        return None
+     
 
-# --- Agente 02: Analista e correttore LLM
-def agente_analista(file_tex_grezzo, file_tex_pulito, file_json_immagini):
-     """
-     Usa Gemini per pulire il file .tex e identificare le immagini necessarie.
-     Restituisce l'elenco delle immagini richieste o None in caso di errore
-     """
+# --- Agente 02: Correttore LLM --- 
+def agente_correttore(testo_grezzo):
+    """
+    Uso Gemini per pulire il file .tex, correggendo solo le formule.
+    Restituisco il testo pulito.
+    """
 
-     print(f"Avvio Agente 02 da file .tex grezzo '{file_tex_grezzo}'")
+    print(f"Avvio Agente 02 per correggere il testo...")
 
-     try:
-        # Apriamo il file .tex
-        with open(file_tex_grezzo,'r', encoding='utf-8') as file:
-            testo_grezzo = file.read()
-        
-        # Diciamo a Gemini di risponderci in JSON
-        generation_config = genai.GenerationConfig(
-             response_mime_type="application/json"
-        )
-        model = genai.GenerativeModel(
-             'models/gemini-pro-latest',
-             generation_config=generation_config
-        )
+    try:
+        # Dico a Gemini che modello usare
+        model = genai.GenerativeModel('models/gemini-2.5-pro')
 
-
-        # Definiamo il prompt di questo agente
-
+        # Definisco il prompt di questo agente
         prompt = f"""
-        Sei un esperto di LaTeX e un analista di contenuti.
-        Dato il seguente testo .tex:
-
-        1.  Correggi la sintassi delle formule. Trasforma '$$formula$$' in \\[ formula \\] (per le formule a capo) o $formula$ (per le formule inline) in base al contesto.
-        2.  Identifica UN (1) solo concetto chiave in questo breve testo che beneficerebbe di un'immagine.
-        3.  Per quell'immagine, genera un segnaposto univoco (es. %%PLACEHOLDER_CONCETTO%%).
-        4.  Genera una query di ricerca ottimizzata per trovare quell'immagine con licenza libera (es. "teorema di pitagora creative commons diagramma").
-        5.  Genera una breve didascalia (caption) per l'immagine.
-
-        Restituisci ESATTAMENTE un oggetto JSON con questa struttura:
-        {{
-          "testo_modificato": "Il tuo testo LaTeX corretto e con il segnaposto inserito...",
-          "immagini_richieste": [
-            {{
-              "placeholder": "%%PLACEHOLDER_NOME%%",
-              "query": "query di ricerca con licenza libera",
-              "caption": "Didascalia per l'immagine"
-            }}
-          ]
-        }}
         
+        Sei un esperto di LaTeX.
+        Dato il seguente documento .tex completo:
+
+        1.  Trova tutte le formule matematiche scritte come '$$formula$$'.
+        2.  Correggile nella sintassi LaTeX corretta:
+            - Usa \\[ formula \\] per le formule che dovrebbero stare su una riga a sé (display).
+            - Usa $formula$ per le formule che dovrebbero stare dentro la frase (inline).
+        3.  Assicurati che il pacchetto \\usepackage{{amsmath}} sia presente nel preambolo (PRIMA di \\begin{{document}}), se non c'è già.
+        4.  Rimuovi COMPLETAMENTE il pacchetto \\usepackage{{xcolor}} e qualsiasi comando \\color{{}} dal documento.
+        5.  Il testo deve essere NERO (colore predefinito) e GIUSTIFICATO (allineamento predefinito).
+        6.  Mantieni tutti gli altri pacchetti necessari (hyperref, amsmath, amssymb, etc.).
+        7.  Verifica che tutti gli ambienti \\begin{{}} abbiano il corrispondente \\end{{}}.
+        
+        IMPORTANTE:
+        - Restituisci l'INTERO documento .tex, preservando tutta la struttura originale
+        - Includi \\documentclass, tutti i \\usepackage necessari, \\begin{{document}}, e \\end{{document}}
+        - Restituisci SOLO il codice .tex puro e completo, dall'inizio alla fine
+        - NON usare blocchi di codice Markdown (come ```latex o ```)
+        - NON aggiungere commenti o testo prima o dopo il codice LaTeX
+        - Il testo finale deve essere in NERO
+
         Ecco il testo .tex da analizzare:
         --- INIZIO TESTO ---
         {testo_grezzo}
         --- FINE TESTO ---
         """
 
-        response = model.generate_content(prompt)
         print(f"Contatto l'API di Gemini (attendere qualche secondo)...")
+        response = model.generate_content(prompt)
 
-        dati_risposta = json.loads(response.text)
+        testo_pulito = response.text.strip()
+        
+        # Rimuovo i blocchi di codice Markdown se presenti
+        if testo_pulito.startswith('```'):
+            prima_newline = testo_pulito.find('\n')
+            if prima_newline != -1:
+                testo_pulito = testo_pulito[prima_newline + 1:]
+        
+        if testo_pulito.endswith('```'):
+            testo_pulito = testo_pulito[:-3]
+        
+        testo_pulito = testo_pulito.strip()
 
-        with open(file_tex_pulito, 'w', encoding='utf-8') as file:
-            file.write(dati_risposta['testo_modificato'])
-            print(f"File .tex pulito salvato con successo: '{file_tex_pulito}'")
-
-        with open(file_json_immagini, 'w', encoding='utf-8') as file:
-             json.dump(dati_risposta['immagini_richieste'], file, indent=2, ensure_ascii=False)
-             print(f"Immagini salvate con successo in: '{file_json_immagini}'")
-
-        return dati_risposta['immagini_richieste']
+        return testo_pulito
      
-     except Exception as e:
+    except Exception as e:
         print(f"ERRORE Agente 2 (LLM): {e}")
-        # Potrebbe essere un errore API, un errore di parsing JSON, ecc.
         return None
 
+# --- AGENTE 3: IL COMPILATORE (LaTeX) --- 
+def agente_compilatore(testo_tex_finale, output_pdf_path):
+    """
+    Compilo il file .tex finale in un .pdf usando 'pdflatex'.
+    Restituisco True se ha successo, False altrimenti.
+    """
+    print(f"Agente 3: Avvio compilazione PDF ---")
+
+    # Controllo se pdflatex è installato prima di provare
+    try:
+        subprocess.run(
+            ['pdflatex', '--version'],
+            capture_output=True, check=True
+        )
+    except FileNotFoundError:
+        print("ERRORE: 'pdflatex' non trovato.")
+        print("Assicurati di aver installato una distribuzione LaTeX (es. MiKTeX o TeX Live).")
+        return False
+    
+    # Creo un nome file temporaneo unico
+    temp_tex = f"temp_{uuid.uuid4().hex}.tex"
+    temp_pdf = temp_tex.replace('.tex', '.pdf')
+    temp_log = temp_tex.replace('.tex', '.log')
+    temp_aux = temp_tex.replace('.tex', '.aux')
+    
+    try:
+        # Scrivo il file .tex temporaneo
+        with open(temp_tex, 'w', encoding='utf-8') as f:
+            f.write(testo_tex_finale)
+        
+        # Eseguo la compilazione DUE VOLTE
+        for i in range(2):
+            print(f"Compilazione PDF (Passaggio {i + 1}/2)...")
+            processo = subprocess.run(
+                ['pdflatex', '-interaction=nonstopmode', temp_tex],
+                capture_output=True,
+                text=True,
+                encoding='utf-8'
+            )
+            
+            if processo.returncode != 0:
+                print(f"ERRORE: Compilazione LaTeX fallita (Passaggio {i + 1}).")
+                if os.path.exists(temp_log):
+                    with open(temp_log, 'r', encoding='utf-8') as log:
+                        for linea in log:
+                            if linea.startswith("!"): 
+                                print(f"Dettaglio Errore: {linea.strip()}")
+                                break
+                # Pulisco i file temporanei
+                for f in [temp_tex, temp_pdf, temp_log, temp_aux]:
+                    if os.path.exists(f):
+                        os.remove(f)
+                return False
+
+        # Copio il PDF alla posizione finale
+        if os.path.exists(temp_pdf):
+            shutil.copy2(temp_pdf, output_pdf_path)
+            print(f"Successo: PDF compilato salvato come '{output_pdf_path}'")
+            
+            # Pulisco i file temporanei
+            for f in [temp_tex, temp_pdf, temp_log, temp_aux]:
+                if os.path.exists(f):
+                    os.remove(f)
+            return True
+        else:
+            print(f"ERRORE: PDF non generato")
+            # Pulisco i file temporanei
+            for f in [temp_tex, temp_pdf, temp_log, temp_aux]:
+                if os.path.exists(f):
+                    os.remove(f)
+            return False
+    
+    except Exception as e:
+        print(f"ERRORE Critico durante l'esecuzione di pdflatex: {e}")
+        # Pulisco i file temporanei in caso di errore
+        for f in [temp_tex, temp_pdf, temp_log, temp_aux]:
+            if os.path.exists(f):
+                os.remove(f)
+        return False
     
 
 def main():
     """
-        Esegue le operazioni
+        Eseguo le operazioni
     """
 
     input_file = "documento.docx"
-    output_file_grezzo = "temp_grezzo.tex"
-    temp_file_grezzo_pulito = "temp_pulito.tex"
-    temp_file_json = "temp_immagini.json"    
-
-    risultato_agent_01 = agente_convertitore(input_file,output_file_grezzo)
-
-    if risultato_agent_01:
-        print(f"Operazione agente 01 eseguita con successo!")
+    output_pdf = "documento.pdf"
+    
+    # --- Esecuzione Agente 1 ---
+    testo_grezzo = agente_convertitore(input_file)
+    if not testo_grezzo:
+        print(f"PIPELINE (Agente 1) FALLITA. Interruzione")
+        return
     else:
-         print(f"Operazione agente 01 fallita")
+        print(f"Operazione agente 1 eseguita con successo!")
 
-    richieste_immagini = agente_analista(
-         output_file_grezzo,
-         temp_file_grezzo_pulito,
-         temp_file_json
-    )
+    # --- Esecuzione Agente 2 ---
+    testo_pulito = agente_correttore(testo_grezzo)
+    if testo_pulito is None:
+        print(f"PIPELINE (Agente 2) FALLITA. Interruzione.")
+        return
+    else:
+        print(f"Operazione Agente 2 eseguita con successo!")
 
-    if richieste_immagini is None:
-        print(f"Operazione agente 02 fallita")
+    # --- Esecuzione Agente 3 ---
+    if not agente_compilatore(testo_pulito, output_pdf):
+        print(f"PIPELINE (Agente 3) FALLITA. Interruzione.")
         return
     
-    print(f"Operazione Agente 02 eseguita con successo!")
+    print("PIPELINE COMPLETATA CON SUCCESSO")
+    print(f"File finale: {output_pdf}")
 
-
-# Esegui la funzione solo se avvio lo script direttamente
+# Eseguo la funzione solo se avvio lo script direttamente
 if __name__ == "__main__":
-     main()
+    main()
